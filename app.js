@@ -1,16 +1,7 @@
 // ---------------------------------------------------------------------
-// City coordinates — hardcoded for now, search comes later.
+// Default city shown when the page first loads. Search replaces this.
 // ---------------------------------------------------------------------
-const LATITUDE = 59.3293;
-const LONGITUDE = 18.0686;
-const CITY_NAME = "Stockholm";
-
-const FORECAST_URL =
-  `https://api.open-meteo.com/v1/forecast` +
-  `?latitude=${LATITUDE}&longitude=${LONGITUDE}` +
-  `&current=temperature_2m,apparent_temperature,weather_code` +
-  `&daily=weather_code,temperature_2m_max,temperature_2m_min` +
-  `&timezone=auto&forecast_days=5`;
+const DEFAULT_CITY_QUERY = "Stockholm";
 
 // ---------------------------------------------------------------------
 // WMO weather_code -> human-readable description.
@@ -60,12 +51,46 @@ function weekdayFromDateString(dateStr) {
   return date.toLocaleDateString(undefined, { weekday: "short" });
 }
 
-// Reshape the raw Open-Meteo response into the flat shape render() expects.
-function toRenderData(apiResponse) {
+// Look up matching places for a search term. Returns the first result,
+// or null if the API found nothing (a miss omits the "results" key
+// entirely rather than returning an empty array, so that's checked for).
+async function geocodeCity(query) {
+  const url =
+    `https://geocoding-api.open-meteo.com/v1/search` +
+    `?name=${encodeURIComponent(query)}&count=5&language=en&format=json`;
+
+  const response = await fetch(url);
+  const data = await response.json();
+  console.log("Open-Meteo geocoding response:", data);
+
+  if (!data.results || data.results.length === 0) {
+    return null;
+  }
+  return data.results[0];
+}
+
+async function fetchForecast(latitude, longitude) {
+  const url =
+    `https://api.open-meteo.com/v1/forecast` +
+    `?latitude=${latitude}&longitude=${longitude}` +
+    `&current=temperature_2m,apparent_temperature,weather_code` +
+    `&daily=weather_code,temperature_2m_max,temperature_2m_min` +
+    `&timezone=auto&forecast_days=5`;
+
+  const response = await fetch(url);
+  const apiResponse = await response.json();
+  console.log("Open-Meteo forecast response:", apiResponse);
+  return apiResponse;
+}
+
+// Reshape the raw Open-Meteo response + matched place into the flat
+// shape render() expects.
+function toRenderData(apiResponse, place) {
   const { current, current_units, daily } = apiResponse;
 
   return {
-    city: CITY_NAME,
+    city: place.name,
+    region: [place.admin1, place.country].filter(Boolean).join(", "),
     currentTemp: current.temperature_2m,
     feelsLike: current.apparent_temperature,
     conditions: describeWeatherCode(current.weather_code),
@@ -96,6 +121,7 @@ function render(data) {
   card.innerHTML = `
     <section class="current">
       <h1 class="city">${data.city}</h1>
+      <p class="region">${data.region}</p>
       <p class="temp-now">${data.currentTemp}${data.tempUnit}</p>
       <p class="conditions">${data.conditions}</p>
       <p class="feels-like">Feels like ${data.feelsLike}${data.tempUnit}</p>
@@ -109,13 +135,35 @@ function render(data) {
   `;
 }
 
-async function init() {
-  const response = await fetch(FORECAST_URL);
-  const apiResponse = await response.json();
-
-  console.log("Open-Meteo raw response:", apiResponse);
-
-  render(toRenderData(apiResponse));
+function setStatus(message) {
+  document.getElementById("search-status").textContent = message;
 }
 
-init();
+async function loadCity(query) {
+  const place = await geocodeCity(query);
+  if (!place) {
+    setStatus(`No matching city found for "${query}".`);
+    return;
+  }
+
+  setStatus("");
+  const apiResponse = await fetchForecast(place.latitude, place.longitude);
+  render(toRenderData(apiResponse, place));
+}
+
+function initSearchForm() {
+  const form = document.getElementById("search-form");
+  const input = document.getElementById("city-input");
+
+  // A <button type="submit"> inside a <form> already fires this on
+  // Enter, so no separate keydown listener is needed for that.
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const query = input.value.trim();
+    if (!query) return;
+    loadCity(query);
+  });
+}
+
+initSearchForm();
+loadCity(DEFAULT_CITY_QUERY);

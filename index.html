@@ -7,9 +7,23 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <main class="weather-card" id="weather-card">
-    <!-- Content is rendered by app.js from the WEATHER_DATA object -->
-  </main>
+  <div class="page">
+    <form class="search-bar" id="search-form">
+      <input
+        type="text"
+        id="city-input"
+        class="search-input"
+        placeholder="Search city..."
+        autocomplete="off"
+      />
+      <button type="submit" class="search-button">Search</button>
+    </form>
+    <p class="search-status" id="search-status"></p>
+
+    <main class="weather-card" id="weather-card">
+      <!-- Content is rendered by app.js from live API data -->
+    </main>
+  </div>
 
   <script src="app.js"></script>
 </body>
