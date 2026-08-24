@@ -51,6 +51,25 @@ function weekdayFromDateString(dateStr) {
   return date.toLocaleDateString(undefined, { weekday: "short" });
 }
 
+// Thrown when a response comes back with a non-OK HTTP status, so the
+// caller can tell that apart from a network failure (fetch throwing)
+// or a plain empty result.
+class HttpError extends Error {
+  constructor(status) {
+    super(`Request failed with status ${status}`);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new HttpError(response.status);
+  }
+  return response.json();
+}
+
 // Look up matching places for a search term. Returns the first result,
 // or null if the API found nothing (a miss omits the "results" key
 // entirely rather than returning an empty array, so that's checked for).
@@ -59,8 +78,7 @@ async function geocodeCity(query) {
     `https://geocoding-api.open-meteo.com/v1/search` +
     `?name=${encodeURIComponent(query)}&count=5&language=en&format=json`;
 
-  const response = await fetch(url);
-  const data = await response.json();
+  const data = await fetchJson(url);
   console.log("Open-Meteo geocoding response:", data);
 
   if (!data.results || data.results.length === 0) {
@@ -77,10 +95,9 @@ async function fetchForecast(latitude, longitude) {
     `&daily=weather_code,temperature_2m_max,temperature_2m_min` +
     `&timezone=auto&forecast_days=5`;
 
-  const response = await fetch(url);
-  const apiResponse = await response.json();
-  console.log("Open-Meteo forecast response:", apiResponse);
-  return apiResponse;
+  const data = await fetchJson(url);
+  console.log("Open-Meteo forecast response:", data);
+  return data;
 }
 
 // Reshape the raw Open-Meteo response + matched place into the flat
@@ -95,6 +112,10 @@ function toRenderData(apiResponse, place) {
     feelsLike: current.apparent_temperature,
     conditions: describeWeatherCode(current.weather_code),
     tempUnit: current_units.temperature_2m,
+    lastUpdated: new Date().toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    }),
     forecast: daily.time.map((dateStr, i) => ({
       day: weekdayFromDateString(dateStr),
       high: daily.temperature_2m_max[i],
@@ -125,6 +146,7 @@ function render(data) {
       <p class="temp-now">${data.currentTemp}${data.tempUnit}</p>
       <p class="conditions">${data.conditions}</p>
       <p class="feels-like">Feels like ${data.feelsLike}${data.tempUnit}</p>
+      <p class="last-updated">Last updated ${data.lastUpdated}</p>
     </section>
     <section class="forecast">
       <h2 class="forecast-heading">5-Day Forecast</h2>
@@ -135,33 +157,85 @@ function render(data) {
   `;
 }
 
-function setStatus(message) {
-  document.getElementById("search-status").textContent = message;
+function setStatus(message, kind) {
+  const el = document.getElementById("search-status");
+  el.textContent = message;
+  if (kind) {
+    el.dataset.kind = kind;
+  } else {
+    delete el.dataset.kind;
+  }
 }
 
-async function loadCity(query) {
-  const place = await geocodeCity(query);
-  if (!place) {
-    setStatus(`No matching city found for "${query}".`);
+function setSearchDisabled(disabled) {
+  document.getElementById("search-button").disabled = disabled;
+  document.getElementById("city-input").disabled = disabled;
+}
+
+function describeError(err) {
+  if (err instanceof HttpError) {
+    return `Weather service returned an error (status ${err.status}). Please try again.`;
+  }
+  if (err instanceof TypeError) {
+    // fetch() rejects with a TypeError for network-level failures:
+    // offline, DNS failure, blocked by CORS, etc.
+    return "Network error — check your connection and try again.";
+  }
+  return "Something went wrong. Please try again.";
+}
+
+// Guards against out-of-order responses: each call gets an id, and
+// after every await it checks whether a newer call has since started.
+// If so, this one is stale and bows out without touching the page —
+// so a slow response can never overwrite a faster, more recent one.
+let latestRequestId = 0;
+
+async function loadCity(rawQuery) {
+  const query = rawQuery.trim();
+
+  if (!query) {
+    setStatus("Enter a city name to search.", "error");
     return;
   }
 
-  setStatus("");
-  const apiResponse = await fetchForecast(place.latitude, place.longitude);
-  render(toRenderData(apiResponse, place));
+  const requestId = ++latestRequestId;
+  setStatus(`Loading weather for "${query}"…`, "loading");
+  setSearchDisabled(true);
+
+  try {
+    const place = await geocodeCity(query);
+    if (requestId !== latestRequestId) return; // a newer search superseded this one
+
+    if (!place) {
+      setStatus(`No matching city found for "${query}".`, "error");
+      return;
+    }
+
+    const apiResponse = await fetchForecast(place.latitude, place.longitude);
+    if (requestId !== latestRequestId) return; // a newer search superseded this one
+
+    render(toRenderData(apiResponse, place));
+    setStatus("", null);
+  } catch (err) {
+    if (requestId !== latestRequestId) return; // a newer search superseded this one
+    console.error(err);
+    setStatus(describeError(err), "error");
+  } finally {
+    if (requestId === latestRequestId) {
+      setSearchDisabled(false);
+    }
+  }
 }
 
 function initSearchForm() {
   const form = document.getElementById("search-form");
   const input = document.getElementById("city-input");
+  const button = document.getElementById("search-button");
 
-  // A <button type="submit"> inside a <form> already fires this on
-  // Enter, so no separate keydown listener is needed for that.
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const query = input.value.trim();
-    if (!query) return;
-    loadCity(query);
+    if (button.disabled) return; // belt-and-braces against double submission
+    loadCity(input.value);
   });
 }
 
