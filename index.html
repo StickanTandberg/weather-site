@@ -5,9 +5,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Weather</title>
   <link rel="stylesheet" href="style.css" />
+  <script>
+    // Applied before first paint so the page doesn't flash the wrong
+    // theme. app.js re-derives the same value and owns it from then on.
+    (function () {
+      try {
+        var stored = localStorage.getItem("weather-color-scheme");
+        if (stored === "dark" || stored === "light") {
+          document.documentElement.setAttribute("data-theme", stored);
+        }
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <div class="page">
+    <div class="topbar">
+      <button type="button" id="theme-toggle" class="theme-toggle"></button>
+    </div>
     <form class="search-bar" id="search-form">
       <label for="city-input" class="visually-hidden">City name</label>
       <input

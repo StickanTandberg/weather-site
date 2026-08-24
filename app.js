@@ -4,6 +4,79 @@
 const DEFAULT_CITY_QUERY = "Stockholm";
 
 // ---------------------------------------------------------------------
+// Dark mode: defaults to prefers-color-scheme, overridable via the
+// toggle button, override persisted in localStorage. The <head> inline
+// script applies any stored override before first paint to avoid a
+// flash of the wrong theme; this just takes over from there.
+// ---------------------------------------------------------------------
+const THEME_STORAGE_KEY = "weather-color-scheme";
+
+function readStoredTheme() {
+  try {
+    const value = localStorage.getItem(THEME_STORAGE_KEY);
+    return value === "dark" || value === "light" ? value : null;
+  } catch {
+    return null; // localStorage unavailable (private browsing, etc.)
+  }
+}
+
+function writeStoredTheme(theme) {
+  try {
+    if (theme) {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } else {
+      localStorage.removeItem(THEME_STORAGE_KEY);
+    }
+  } catch {
+    // Theme just won't persist across reloads.
+  }
+}
+
+function systemPrefersDark() {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function effectiveTheme(override) {
+  return override || (systemPrefersDark() ? "dark" : "light");
+}
+
+function applyTheme(override) {
+  if (override) {
+    document.documentElement.setAttribute("data-theme", override);
+  } else {
+    document.documentElement.removeAttribute("data-theme");
+  }
+  updateThemeToggleButton(override);
+}
+
+function updateThemeToggleButton(override) {
+  const button = document.getElementById("theme-toggle");
+  const current = effectiveTheme(override);
+  const next = current === "dark" ? "light" : "dark";
+  button.textContent = current === "dark" ? "Light mode" : "Dark mode";
+  button.setAttribute("aria-label", `Switch to ${next} mode`);
+}
+
+function initTheme() {
+  let override = readStoredTheme();
+  applyTheme(override);
+
+  document.getElementById("theme-toggle").addEventListener("click", () => {
+    override = effectiveTheme(override) === "dark" ? "light" : "dark";
+    writeStoredTheme(override);
+    applyTheme(override);
+  });
+
+  // Keep the button label in sync if the system theme changes while no
+  // explicit override is set.
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (!override) {
+      updateThemeToggleButton(null);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------
 // WMO weather_code -> human-readable description.
 // https://open-meteo.com/en/docs (see "WMO Weather interpretation codes")
 // ---------------------------------------------------------------------
@@ -239,5 +312,6 @@ function initSearchForm() {
   });
 }
 
+initTheme();
 initSearchForm();
 loadCity(DEFAULT_CITY_QUERY);
