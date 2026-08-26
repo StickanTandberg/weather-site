@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Weather</title>
+  <title>Fairway Forecast</title>
   <link rel="stylesheet" href="style.css" />
   <script>
     // Applied before first paint so the page doesn't flash the wrong
@@ -21,23 +21,37 @@
 <body>
   <div class="page">
     <div class="topbar">
+      <div class="brand">
+        <svg class="brand-flag" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path class="brand-flag-pole" d="M7 2.5v19" />
+          <path class="brand-flag-cloth" d="M7 3.5 19 7 7 10.5z" />
+          <path class="brand-flag-green" d="M2 21.5h20" />
+        </svg>
+        <span class="brand-name">Fairway Forecast</span>
+      </div>
       <button type="button" id="theme-toggle" class="theme-toggle"></button>
     </div>
+
     <form class="search-bar" id="search-form">
-      <label for="city-input" class="visually-hidden">City name</label>
+      <label for="city-input" class="visually-hidden">Course or city name</label>
       <input
         type="text"
         id="city-input"
         class="search-input"
-        placeholder="Search city..."
+        placeholder="Search a course town..."
         autocomplete="off"
       />
       <button type="submit" class="search-button" id="search-button">Search</button>
     </form>
     <p class="search-status" id="search-status" role="status" aria-live="polite" aria-atomic="true"></p>
 
+    <section class="saved-places" id="saved-places" aria-label="Saved places" hidden>
+      <h2 class="saved-heading">My courses</h2>
+      <ul class="saved-list" id="saved-list"></ul>
+    </section>
+
     <main class="weather-card" id="weather-card">
-      <p class="placeholder">Fetching weather…</p>
+      <p class="placeholder">Walking the course…</p>
     </main>
   </div>
 
