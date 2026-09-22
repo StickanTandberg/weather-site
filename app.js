@@ -597,7 +597,10 @@ async function loadPlace(place, requestId = ++latestRequestId) {
     if (requestId !== latestRequestId) return; // a newer search superseded this one
 
     currentPlace = place;
-    render(toRenderData(apiResponse, place));
+    const data = toRenderData(apiResponse, place);
+    render(data);
+    currentWind = data.wind;
+    paintCompass(); // no-op while the compass is closed
     renderSavedPlaces(); // refresh which saved chip is highlighted
     setStatus("", null);
   } catch (err) {
@@ -729,6 +732,150 @@ function initGeolocation() {
   document.getElementById("use-location").addEventListener("click", useMyLocation);
 }
 
+// ---------------------------------------------------------------------
+// Wind compass. The dial deliberately lives outside #weather-card:
+// render() replaces that element's contents wholesale on every load, so
+// a dial in there would be torn out from under its own animation.
+//
+// Every angle below is degrees clockwise from north:
+//   heading   the way the phone — and so the player — is pointing
+//   direction the way the wind blows FROM, as Open-Meteo reports it
+//   relative  (direction - heading): where the wind comes from relative
+//             to the way you're facing, so 0 is straight in your face
+//
+// The heading is pinned to 0 until the sensor arrives, which is simply a
+// north-up chart: correct, just not live.
+// ---------------------------------------------------------------------
+const compassState = {
+  open: false,
+  heading: 0,
+  hasSensor: false,
+};
+
+// Wind from the most recent forecast, so the compass can repaint without
+// refetching. Kept in step with the card by loadPlace().
+let currentWind = null;
+
+function relativeWindAngle(windDirection, heading) {
+  return (((windDirection - heading) % 360) + 360) % 360;
+}
+
+// Sectors measured from straight ahead: within 30 degrees is a head or
+// tail wind, 60-120 is across, and the 30-degree wedges between them are
+// quartering. "Off the right" means the wind arrives over your right
+// shoulder, so the ball drifts left.
+function describeRelativeWind(relative) {
+  const angle = ((relative % 360) + 360) % 360;
+
+  if (angle <= 30 || angle >= 330) {
+    return { label: "Headwind", hint: "Club up and swing easy." };
+  }
+  if (angle < 60) {
+    return { label: "Quartering headwind, off the right", hint: "Club up; the ball drifts left." };
+  }
+  if (angle <= 120) {
+    return { label: "Crosswind, off the right", hint: "Aim right — the ball drifts left." };
+  }
+  if (angle < 150) {
+    return { label: "Quartering tailwind, off the right", hint: "Club down; the ball drifts left." };
+  }
+  if (angle <= 210) {
+    return { label: "Tailwind", hint: "Club down — it will run out." };
+  }
+  if (angle < 240) {
+    return { label: "Quartering tailwind, off the left", hint: "Club down; the ball drifts right." };
+  }
+  if (angle <= 300) {
+    return { label: "Crosswind, off the left", hint: "Aim left — the ball drifts right." };
+  }
+  return { label: "Quartering headwind, off the left", hint: "Club up; the ball drifts right." };
+}
+
+function compassFacingText() {
+  if (!compassState.hasSensor) {
+    return "No compass sensor — the dial is locked north up.";
+  }
+  const heading = Math.round(compassState.heading) % 360;
+  return `Facing ${heading}\u00b0 (${compassFromDegrees(heading)})`;
+}
+
+// Writes the whole compass from compassState + currentWind. Cheap enough
+// to call on every animation frame once the sensor is driving it.
+function paintCompass() {
+  if (!compassState.open) return; // nothing to paint while it's closed
+
+  const panel = document.getElementById("wind-compass");
+  const direction = currentWind?.direction;
+  const hasDirection = direction !== null && direction !== undefined && !Number.isNaN(Number(direction));
+
+  panel.classList.toggle("has-wind", hasDirection);
+
+  // The rose turns against the phone, so north keeps pointing north.
+  document.getElementById("compass-rose").style.transform =
+    `rotate(${-compassState.heading}deg)`;
+
+  const speedUnit = currentWind?.speedUnit ? ` ${currentWind.speedUnit}` : "";
+  document.getElementById("compass-speed").textContent = formatValue(
+    currentWind?.speed ?? null,
+    speedUnit
+  );
+
+  const gusts = currentWind?.gusts ?? null;
+  document.getElementById("compass-gusts").textContent =
+    gusts === null ? "" : `gusting ${formatValue(gusts, speedUnit)}`;
+
+  document.getElementById("compass-from").textContent = hasDirection
+    ? `from ${compassFromDegrees(direction)}`
+    : "wind direction unavailable";
+
+  const readout = document.getElementById("compass-readout");
+  const hint = document.getElementById("compass-hint");
+
+  if (hasDirection) {
+    const relative = relativeWindAngle(Number(direction), compassState.heading);
+    // Same convention as the daily strip: the arrow points where the
+    // wind blows TO, which is half a turn from where it comes FROM.
+    document.getElementById("compass-wind").style.transform =
+      `rotate(${relative + 180}deg)`;
+
+    const read = describeRelativeWind(relative);
+    readout.textContent = read.label;
+    hint.textContent = read.hint;
+  } else {
+    readout.textContent = currentWind ? "No wind direction for this spot" : "Waiting for wind data…";
+    hint.textContent = "";
+  }
+
+  document.getElementById("compass-facing").textContent = compassFacingText();
+}
+
+function openCompass() {
+  compassState.open = true;
+  document.getElementById("wind-compass").hidden = false;
+  const toggle = document.getElementById("compass-toggle");
+  toggle.setAttribute("aria-expanded", "true");
+  toggle.classList.add("is-active");
+  paintCompass();
+}
+
+function closeCompass() {
+  compassState.open = false;
+  document.getElementById("wind-compass").hidden = true;
+  const toggle = document.getElementById("compass-toggle");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.classList.remove("is-active");
+}
+
+function initCompass() {
+  document.getElementById("compass-toggle").addEventListener("click", () => {
+    if (compassState.open) {
+      closeCompass();
+    } else {
+      openCompass();
+    }
+  });
+}
+
 function initSearchForm() {
   const form = document.getElementById("search-form");
   const input = document.getElementById("city-input");
@@ -745,6 +892,7 @@ initTheme();
 initSearchForm();
 initSavedPlaces();
 initGeolocation();
+initCompass();
 
 // Open on the first saved course when there is one, otherwise the default.
 const savedOnLoad = readSavedPlaces();
