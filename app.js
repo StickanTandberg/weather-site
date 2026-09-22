@@ -128,6 +128,7 @@ function isPlaceSaved(place) {
 function toSavedPlace(place) {
   return {
     name: place.name,
+    region: place.region ?? null,
     admin1: place.admin1 ?? null,
     country: place.country ?? null,
     latitude: place.latitude,
@@ -280,6 +281,9 @@ function escapeHtml(value) {
 }
 
 function placeRegion(place) {
+  // A place can carry a ready-made region line (the GPS path uses this
+  // for its coordinates); otherwise it's built from the geocoding fields.
+  if (place.region) return place.region;
   return [place.admin1, place.country].filter(Boolean).join(", ");
 }
 
@@ -582,26 +586,52 @@ let latestRequestId = 0;
 // The place currently on screen, so it can be saved or un-saved.
 let currentPlace = null;
 
+// How many loads are waiting on the network. The background refresh
+// stands down while one is in flight, so it can never claim a request id
+// and cancel a search the player is waiting on.
+let inFlightLoads = 0;
+
+// When the forecast on screen was last fetched, so a page coming back
+// from the background can tell whether it has gone stale.
+let lastLoadedAt = 0;
+
 // Loads a place that's already been resolved to coordinates — a saved
-// place, or a fresh geocoding hit.
-async function loadPlace(place, requestId = ++latestRequestId) {
-  setStatus(`Loading conditions for ${place.name}…`, "loading");
-  setSearchDisabled(true);
+// place, a fresh geocoding hit, or the ten-minute refresh.
+//
+// A quiet load is that refresh: it repaints the card and the compass but
+// leaves the status line and the search box alone, so the page doesn't
+// flash "Loading…" and grey out the search every ten minutes while
+// you're standing over a shot.
+async function loadPlace(place, requestId = ++latestRequestId, { quiet = false } = {}) {
+  if (!quiet) {
+    setStatus(`Loading conditions for ${place.name}…`, "loading");
+    setSearchDisabled(true);
+  }
+  inFlightLoads += 1;
 
   try {
     const apiResponse = await fetchForecast(place.latitude, place.longitude);
     if (requestId !== latestRequestId) return; // a newer search superseded this one
 
     currentPlace = place;
-    render(toRenderData(apiResponse, place));
+    const data = toRenderData(apiResponse, place);
+    render(data);
+    currentWind = data.wind;
+    lastLoadedAt = Date.now();
+    paintCompass(); // no-op while the compass is closed
     renderSavedPlaces(); // refresh which saved chip is highlighted
-    setStatus("", null);
+
+    if (!quiet) setStatus("", null);
   } catch (err) {
     if (requestId !== latestRequestId) return; // a newer search superseded this one
     console.error(err);
-    setStatus(describeError(err), "error");
+    // A failed background refresh keeps quiet: what's on screen is still
+    // the best we have, and its "Last updated" time stops advancing,
+    // which is the honest signal that it's going stale.
+    if (!quiet) setStatus(describeError(err), "error");
   } finally {
-    if (requestId === latestRequestId) {
+    inFlightLoads -= 1;
+    if (!quiet && requestId === latestRequestId) {
       setSearchDisabled(false);
     }
   }
@@ -618,6 +648,7 @@ async function loadCity(rawQuery) {
   const requestId = ++latestRequestId;
   setStatus(`Loading weather for "${query}"…`, "loading");
   setSearchDisabled(true);
+  inFlightLoads += 1;
 
   try {
     const place = await geocodeCity(query);
@@ -637,7 +668,541 @@ async function loadCity(rawQuery) {
     console.error(err);
     setStatus(describeError(err), "error");
     setSearchDisabled(false);
+  } finally {
+    inFlightLoads -= 1;
   }
+}
+
+// ---------------------------------------------------------------------
+// "Use my location": ask the browser for a GPS fix and load the forecast
+// for those coordinates. Geolocation is only available in a secure
+// context (HTTPS, or localhost while developing) — on a plain-http host
+// the browser reports it as a denial rather than an error, which the
+// messages below are worded to survive.
+// ---------------------------------------------------------------------
+const GEOLOCATION_OPTIONS = {
+  enableHighAccuracy: true, // worth the battery: a course is a big place
+  timeout: 10000,
+  maximumAge: 60000, // a fix from the last minute is close enough
+};
+
+// Rendered as the region line under "My location", so a saved fix can
+// still be told apart from one taken at a different course.
+function formatCoordinates(latitude, longitude) {
+  const lat = `${Math.abs(latitude).toFixed(3)}\u00b0${latitude >= 0 ? "N" : "S"}`;
+  const lon = `${Math.abs(longitude).toFixed(3)}\u00b0${longitude >= 0 ? "E" : "W"}`;
+  return `${lat}, ${lon}`;
+}
+
+// GeolocationPositionError codes, spelled out rather than compared
+// against the constants, which don't exist when the API is missing.
+function describeGeolocationError(err) {
+  switch (err?.code) {
+    case 1: // PERMISSION_DENIED
+      return "Location permission denied — search for the course instead.";
+    case 2: // POSITION_UNAVAILABLE
+      return "Couldn't get a position fix. Try again out in the open.";
+    case 3: // TIMEOUT
+      return "Location timed out. Try again with a clear view of the sky.";
+    default:
+      return "Couldn't read your location. Search for the course instead.";
+  }
+}
+
+function setLocationBusy(busy) {
+  const button = document.getElementById("use-location");
+  button.disabled = busy;
+  button.classList.toggle("is-busy", busy);
+}
+
+function useMyLocation() {
+  if (!navigator.geolocation) {
+    setStatus("This browser can't share a location. Search for the course instead.", "error");
+    return;
+  }
+
+  // The request id is claimed on the tap rather than when the fix lands,
+  // so a search started while GPS is still thinking wins — the same
+  // staleness guard the search path uses.
+  const requestId = ++latestRequestId;
+  setStatus("Finding you on the course\u2026", "loading");
+  setLocationBusy(true);
+
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      setLocationBusy(false);
+      if (requestId !== latestRequestId) return; // superseded while waiting
+
+      const { latitude, longitude } = position.coords;
+      loadPlace(
+        {
+          name: "My location",
+          region: formatCoordinates(latitude, longitude),
+          latitude,
+          longitude,
+        },
+        requestId
+      );
+    },
+    (err) => {
+      setLocationBusy(false);
+      if (requestId !== latestRequestId) return; // superseded while waiting
+      console.error(err);
+      setStatus(describeGeolocationError(err), "error");
+    },
+    GEOLOCATION_OPTIONS
+  );
+}
+
+function initGeolocation() {
+  document.getElementById("use-location").addEventListener("click", useMyLocation);
+}
+
+// ---------------------------------------------------------------------
+// Wind compass. The dial deliberately lives outside #weather-card:
+// render() replaces that element's contents wholesale on every load, so
+// a dial in there would be torn out from under its own animation.
+//
+// Every angle below is degrees clockwise from north:
+//   heading   the way the phone — and so the player — is pointing
+//   direction the way the wind blows FROM, as Open-Meteo reports it
+//   relative  (direction - heading): where the wind comes from relative
+//             to the way you're facing, so 0 is straight in your face
+//
+// The heading is pinned to 0 until the sensor arrives, which is simply a
+// north-up chart: correct, just not live.
+// ---------------------------------------------------------------------
+const compassState = {
+  open: false,
+  heading: 0,          // what's on screen now, eased toward targetHeading
+  targetHeading: null, // the newest sensor reading, null until one lands
+  hasSensor: false,
+  status: "idle",      // idle | starting | live | denied | unavailable
+  sourceRank: 0,       // which kind of reading we've locked onto
+  rafId: null,
+  sensorTimeoutId: null,
+  refreshId: null,
+  suspended: false,    // hidden tab: listeners dropped, permission kept
+};
+
+// How much of the gap to the newest reading to close each frame. Lower is
+// smoother but laggier; 0.15 settles in about a fifth of a second and
+// still swallows the jitter a phone magnetometer produces.
+const HEADING_SMOOTHING = 0.15;
+
+// A reading has to arrive within this long, or we decide there's no
+// usable compass and fall back to the north-up dial.
+const SENSOR_TIMEOUT_MS = 2500;
+
+// How often the forecast is refetched while the compass is on screen.
+// Open-Meteo updates hourly, so this is about keeping a long round
+// honest rather than chasing new data.
+const COMPASS_REFRESH_MS = 10 * 60 * 1000;
+
+// Wind from the most recent forecast, so the compass can repaint without
+// refetching. Kept in step with the card by loadPlace().
+let currentWind = null;
+
+function relativeWindAngle(windDirection, heading) {
+  return (((windDirection - heading) % 360) + 360) % 360;
+}
+
+// Sectors measured from straight ahead: within 30 degrees is a head or
+// tail wind, 60-120 is across, and the 30-degree wedges between them are
+// quartering. "Off the right" means the wind arrives over your right
+// shoulder, so the ball drifts left.
+function describeRelativeWind(relative) {
+  const angle = ((relative % 360) + 360) % 360;
+
+  if (angle <= 30 || angle >= 330) {
+    return { label: "Headwind", hint: "Club up and swing easy." };
+  }
+  if (angle < 60) {
+    return { label: "Quartering headwind, off the right", hint: "Club up; the ball drifts left." };
+  }
+  if (angle <= 120) {
+    return { label: "Crosswind, off the right", hint: "Aim right — the ball drifts left." };
+  }
+  if (angle < 150) {
+    return { label: "Quartering tailwind, off the right", hint: "Club down; the ball drifts left." };
+  }
+  if (angle <= 210) {
+    return { label: "Tailwind", hint: "Club down — it will run out." };
+  }
+  if (angle < 240) {
+    return { label: "Quartering tailwind, off the left", hint: "Club down; the ball drifts right." };
+  }
+  if (angle <= 300) {
+    return { label: "Crosswind, off the left", hint: "Aim left — the ball drifts right." };
+  }
+  return { label: "Quartering headwind, off the left", hint: "Club up; the ball drifts right." };
+}
+
+// Shortest signed way from one bearing to another, always in -180..180.
+// This is what stops the dial taking the long way round when the heading
+// crosses north: 359 -> 5 is +6 degrees, not -354.
+function angleDelta(from, to) {
+  return ((((to - from) % 360) + 540) % 360) - 180;
+}
+
+// One step of a low-pass filter, run per animation frame.
+function smoothHeading(current, target, factor) {
+  const stepped = current + angleDelta(current, target) * factor;
+  return ((stepped % 360) + 360) % 360;
+}
+
+// How far the page itself is rotated from the device's natural
+// orientation. The sensor reports where the device's top edge points, so
+// this is added to get where the top of the *screen* points.
+function screenAngle() {
+  const angle = screen.orientation?.angle ?? window.orientation ?? 0;
+  return Number(angle) || 0;
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+// Sources ranked by how much they can be trusted. A better source may
+// take over later, a worse one is ignored once a better one is running.
+//   3  iOS webkitCompassHeading — already true north, clockwise
+//   2  an absolute event — north-referenced via the magnetometer
+//   1  plain alpha — relative to wherever the device booted, and it
+//      drifts, but it's what desktop orientation emulation provides
+function orientationSourceRank(event) {
+  if (typeof event.webkitCompassHeading === "number" && !Number.isNaN(event.webkitCompassHeading)) {
+    return 3;
+  }
+  if (event.type === "deviceorientationabsolute" || event.absolute === true) {
+    return 2;
+  }
+  return 1;
+}
+
+function headingFromEvent(event) {
+  // iOS hands us a compass bearing directly.
+  if (typeof event.webkitCompassHeading === "number" && !Number.isNaN(event.webkitCompassHeading)) {
+    return event.webkitCompassHeading;
+  }
+  // Everywhere else alpha counts anticlockwise from north, so it has to
+  // be flipped to read as a clockwise bearing.
+  if (typeof event.alpha === "number" && !Number.isNaN(event.alpha)) {
+    return (360 - event.alpha) % 360;
+  }
+  return null; // an event with nothing usable in it
+}
+
+// Stores the newest reading and nothing else — the DOM is only touched
+// from the animation frame, so a sensor firing 60 times a second can't
+// turn into 60 layouts.
+function handleOrientationEvent(event) {
+  const rank = orientationSourceRank(event);
+  if (rank < compassState.sourceRank) return; // a worse source; ignore it
+
+  const heading = headingFromEvent(event);
+  if (heading === null) return;
+
+  compassState.sourceRank = rank;
+  compassState.targetHeading = (((heading + screenAngle()) % 360) + 360) % 360;
+
+  if (!compassState.hasSensor) {
+    // First usable reading: adopt it outright rather than easing to it
+    // from an arbitrary north, which would spin the dial on startup.
+    compassState.heading = compassState.targetHeading;
+    compassState.hasSensor = true;
+    setCompassStatus("live");
+    window.clearTimeout(compassState.sensorTimeoutId);
+    compassState.sensorTimeoutId = null;
+  }
+}
+
+// Both names are attached: Chrome fires deviceorientationabsolute, iOS
+// only ever fires deviceorientation, and Firefox marks its plain event
+// absolute. The ranking above sorts out which one to believe.
+const ORIENTATION_EVENTS = ["deviceorientationabsolute", "deviceorientation"];
+
+function attachOrientationListeners() {
+  detachOrientationListeners(); // idempotent, so a retry can't stack timeouts
+
+  for (const name of ORIENTATION_EVENTS) {
+    window.addEventListener(name, handleOrientationEvent);
+  }
+
+  // Desktop browsers happily add the listener and then never fire it.
+  compassState.sensorTimeoutId = window.setTimeout(() => {
+    if (!compassState.hasSensor) setCompassStatus("unavailable");
+  }, SENSOR_TIMEOUT_MS);
+
+  startCompassLoop();
+}
+
+function detachOrientationListeners() {
+  for (const name of ORIENTATION_EVENTS) {
+    window.removeEventListener(name, handleOrientationEvent);
+  }
+  window.clearTimeout(compassState.sensorTimeoutId);
+  compassState.sensorTimeoutId = null;
+}
+
+// iOS 13+ gates the sensor behind a permission call that only works
+// inside a user gesture — hence the Start compass button.
+function orientationNeedsPermission() {
+  return (
+    typeof DeviceOrientationEvent !== "undefined" &&
+    typeof DeviceOrientationEvent.requestPermission === "function"
+  );
+}
+
+async function startCompassSensor() {
+  if (compassState.status === "live" || compassState.status === "starting") return;
+  setCompassStatus("starting");
+
+  if (orientationNeedsPermission()) {
+    try {
+      const response = await DeviceOrientationEvent.requestPermission();
+      if (response !== "granted") {
+        setCompassStatus("denied");
+        return;
+      }
+    } catch (err) {
+      // Thrown when the call didn't come from a tap, or the page isn't
+      // on HTTPS. Either way there's no sensor to be had.
+      console.error(err);
+      setCompassStatus("denied");
+      return;
+    }
+  }
+
+  attachOrientationListeners();
+}
+
+function stopCompassSensor() {
+  detachOrientationListeners();
+  stopCompassLoop();
+  compassState.suspended = false;
+  compassState.hasSensor = false;
+  compassState.sourceRank = 0;
+  compassState.targetHeading = null;
+  compassState.heading = 0; // back to the north-up chart
+  setCompassStatus("idle");
+}
+
+// The single place the dial is repainted from. Everything else just
+// updates state and lets this pick it up on the next frame.
+function compassFrame() {
+  const target = compassState.targetHeading;
+
+  if (target !== null) {
+    const next = prefersReducedMotion()
+      ? target // no easing: step straight to the reading
+      : smoothHeading(compassState.heading, target, HEADING_SMOOTHING);
+
+    // Below about a twentieth of a degree there's nothing to see, so
+    // skip the repaint and let the browser idle.
+    if (Math.abs(angleDelta(compassState.heading, next)) > 0.05) {
+      compassState.heading = next;
+      paintCompass();
+    }
+  }
+
+  compassState.rafId = window.requestAnimationFrame(compassFrame);
+}
+
+function startCompassLoop() {
+  if (compassState.rafId === null) {
+    compassState.rafId = window.requestAnimationFrame(compassFrame);
+  }
+}
+
+function stopCompassLoop() {
+  if (compassState.rafId !== null) {
+    window.cancelAnimationFrame(compassState.rafId);
+    compassState.rafId = null;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Keeping the wind current, and staying out of the way when the page
+// isn't being looked at. A phone in a back pocket between holes should
+// not be running a magnetometer, an animation frame and a timer.
+// ---------------------------------------------------------------------
+function refreshWindQuietly() {
+  // Nothing to refetch, or a user-initiated load is already running and
+  // would be cancelled if this claimed a newer request id.
+  if (!currentPlace || inFlightLoads > 0 || document.hidden) return;
+  loadPlace(currentPlace, ++latestRequestId, { quiet: true });
+}
+
+function startCompassRefresh() {
+  stopCompassRefresh(); // never stack two timers
+  compassState.refreshId = window.setInterval(refreshWindQuietly, COMPASS_REFRESH_MS);
+}
+
+function stopCompassRefresh() {
+  if (compassState.refreshId !== null) {
+    window.clearInterval(compassState.refreshId);
+    compassState.refreshId = null;
+  }
+}
+
+// Hidden tab: drop the listeners, the frame loop and the timer, but hold
+// on to the heading and the granted permission so coming back doesn't
+// cost another tap.
+function suspendCompass() {
+  stopCompassRefresh();
+  stopCompassLoop();
+
+  if (compassState.status === "live") {
+    detachOrientationListeners();
+    compassState.suspended = true;
+  }
+}
+
+function resumeCompass() {
+  if (!compassState.open) return;
+
+  if (compassState.suspended) {
+    compassState.suspended = false;
+    attachOrientationListeners(); // restarts the frame loop too
+  }
+
+  startCompassRefresh();
+
+  // Back from a spell in a pocket: if the forecast has aged past a
+  // refresh interval, don't wait another ten minutes for fresh wind.
+  if (Date.now() - lastLoadedAt > COMPASS_REFRESH_MS) {
+    refreshWindQuietly();
+  }
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) {
+    suspendCompass();
+  } else {
+    resumeCompass();
+  }
+}
+
+function setCompassStatus(status) {
+  compassState.status = status;
+  // The button is only worth offering when a tap could still achieve
+  // something: not while it's running, and not after a refusal that iOS
+  // won't ask about again.
+  const startButton = document.getElementById("compass-start");
+  startButton.hidden = !(compassState.open && (status === "idle" || status === "unavailable"));
+  startButton.disabled = status === "starting";
+  paintCompass();
+}
+
+function compassFacingText() {
+  switch (compassState.status) {
+    case "live": {
+      const heading = Math.round(compassState.heading) % 360;
+      return `Facing ${heading}\u00b0 (${compassFromDegrees(heading)})`;
+    }
+    case "starting":
+      return "Waking the compass\u2026";
+    case "denied":
+      return "Compass permission denied — the dial is locked north up.";
+    case "unavailable":
+      return "No compass sensor — the dial is locked north up.";
+    default:
+      return "Start the compass to have the dial follow the way you're facing.";
+  }
+}
+
+// Writes the whole compass from compassState + currentWind. Cheap enough
+// to call on every animation frame once the sensor is driving it.
+function paintCompass() {
+  if (!compassState.open) return; // nothing to paint while it's closed
+
+  const panel = document.getElementById("wind-compass");
+  const direction = currentWind?.direction;
+  const hasDirection = direction !== null && direction !== undefined && !Number.isNaN(Number(direction));
+
+  panel.classList.toggle("has-wind", hasDirection);
+
+  // The rose turns against the phone, so north keeps pointing north.
+  document.getElementById("compass-rose").style.transform =
+    `rotate(${-compassState.heading}deg)`;
+
+  const speedUnit = currentWind?.speedUnit ? ` ${currentWind.speedUnit}` : "";
+  document.getElementById("compass-speed").textContent = formatValue(
+    currentWind?.speed ?? null,
+    speedUnit
+  );
+
+  const gusts = currentWind?.gusts ?? null;
+  document.getElementById("compass-gusts").textContent =
+    gusts === null ? "" : `gusting ${formatValue(gusts, speedUnit)}`;
+
+  document.getElementById("compass-from").textContent = hasDirection
+    ? `from ${compassFromDegrees(direction)}`
+    : "wind direction unavailable";
+
+  const readout = document.getElementById("compass-readout");
+  const hint = document.getElementById("compass-hint");
+
+  if (hasDirection) {
+    const relative = relativeWindAngle(Number(direction), compassState.heading);
+    // Same convention as the daily strip: the arrow points where the
+    // wind blows TO, which is half a turn from where it comes FROM.
+    document.getElementById("compass-wind").style.transform =
+      `rotate(${relative + 180}deg)`;
+
+    const read = describeRelativeWind(relative);
+    readout.textContent = read.label;
+    hint.textContent = read.hint;
+  } else {
+    readout.textContent = currentWind ? "No wind direction for this spot" : "Waiting for wind data…";
+    hint.textContent = "";
+  }
+
+  document.getElementById("compass-facing").textContent = compassFacingText();
+}
+
+function openCompass() {
+  compassState.open = true;
+  document.getElementById("wind-compass").hidden = false;
+  const toggle = document.getElementById("compass-toggle");
+  toggle.setAttribute("aria-expanded", "true");
+  toggle.classList.add("is-active");
+  paintCompass();
+
+  if (orientationNeedsPermission()) {
+    // iOS: the sensor can only be asked for from inside a tap, so wait
+    // for one rather than firing a request that's guaranteed to throw.
+    setCompassStatus("idle");
+  } else {
+    // Everywhere else there's nothing to ask for, so save the tap.
+    startCompassSensor();
+  }
+
+  startCompassRefresh();
+}
+
+function closeCompass() {
+  compassState.open = false;
+  document.getElementById("wind-compass").hidden = true;
+  const toggle = document.getElementById("compass-toggle");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.classList.remove("is-active");
+  stopCompassRefresh();
+  stopCompassSensor(); // no listeners or animation frames while it's shut
+}
+
+function initCompass() {
+  document.getElementById("compass-toggle").addEventListener("click", () => {
+    if (compassState.open) {
+      closeCompass();
+    } else {
+      openCompass();
+    }
+  });
+
+  document.getElementById("compass-start").addEventListener("click", startCompassSensor);
+
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 }
 
 function initSearchForm() {
@@ -655,6 +1220,8 @@ function initSearchForm() {
 initTheme();
 initSearchForm();
 initSavedPlaces();
+initGeolocation();
+initCompass();
 
 // Open on the first saved course when there is one, otherwise the default.
 const savedOnLoad = readSavedPlaces();

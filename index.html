@@ -50,6 +50,83 @@
       <ul class="saved-list" id="saved-list"></ul>
     </section>
 
+    <div class="tools">
+      <button type="button" id="use-location" class="tool-button">
+        <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="4" />
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 1v3M12 20v3M1 12h3M20 12h3" />
+        </svg>
+        Use my location
+      </button>
+      <button type="button" id="compass-toggle" class="tool-button"
+              aria-expanded="false" aria-controls="wind-compass">
+        <svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="9.5" />
+          <path d="m15.5 8.5-2 5-5 2 2-5z" />
+        </svg>
+        Wind compass
+      </button>
+    </div>
+
+    <section class="wind-compass" id="wind-compass" aria-label="Live wind compass" hidden>
+      <div class="compass-stage">
+        <!-- Fixed marker: the top of the dial is always the way you're facing. -->
+        <span class="compass-facing-marker" aria-hidden="true"></span>
+
+        <svg class="compass-svg" viewBox="0 0 200 200" aria-hidden="true" focusable="false">
+          <circle class="compass-face" cx="100" cy="100" r="95" />
+
+          <!-- Drawn pointing up, then rotated to where the wind blows TO.
+               Sits behind the rose so the letters stay readable when the
+               arrow lands on one of them. -->
+          <g class="compass-wind" id="compass-wind">
+            <line class="compass-wind-shaft" x1="100" y1="74" x2="100" y2="50" />
+            <path class="compass-wind-head" d="M100 30 111 54 100 48 89 54z" />
+          </g>
+
+          <!-- The rose counter-rotates so N keeps pointing at true north. -->
+          <g class="compass-rose" id="compass-rose">
+            <line class="compass-tick is-cardinal" x1="100" y1="12" x2="100" y2="20" transform="rotate(0 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(30 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(60 100 100)" />
+            <line class="compass-tick is-cardinal" x1="100" y1="12" x2="100" y2="20" transform="rotate(90 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(120 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(150 100 100)" />
+            <line class="compass-tick is-cardinal" x1="100" y1="12" x2="100" y2="20" transform="rotate(180 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(210 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(240 100 100)" />
+            <line class="compass-tick is-cardinal" x1="100" y1="12" x2="100" y2="20" transform="rotate(270 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(300 100 100)" />
+            <line class="compass-tick" x1="100" y1="12" x2="100" y2="17" transform="rotate(330 100 100)" />
+            <text class="compass-point is-north" x="100" y="32">N</text>
+            <text class="compass-point" x="168" y="100">E</text>
+            <text class="compass-point" x="100" y="168">S</text>
+            <text class="compass-point" x="32" y="100">W</text>
+          </g>
+
+          <circle class="compass-hub" cx="100" cy="100" r="36" />
+        </svg>
+
+        <div class="compass-centre">
+          <span class="compass-speed" id="compass-speed">&mdash;</span>
+          <span class="compass-gusts" id="compass-gusts"></span>
+          <span class="compass-from" id="compass-from"></span>
+        </div>
+      </div>
+
+      <p class="compass-readout" id="compass-readout"></p>
+      <p class="compass-hint" id="compass-hint"></p>
+      <p class="compass-facing" id="compass-facing"></p>
+      <button type="button" id="compass-start" class="compass-start" hidden>
+        Start compass
+      </button>
+      <p class="compass-note">
+        Model wind for the area &mdash; trees, buildings and the lie of the land
+        will change what you actually feel.
+      </p>
+    </section>
+
     <main class="weather-card" id="weather-card">
       <p class="placeholder">Walking the course…</p>
     </main>
