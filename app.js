@@ -128,6 +128,7 @@ function isPlaceSaved(place) {
 function toSavedPlace(place) {
   return {
     name: place.name,
+    region: place.region ?? null,
     admin1: place.admin1 ?? null,
     country: place.country ?? null,
     latitude: place.latitude,
@@ -280,6 +281,9 @@ function escapeHtml(value) {
 }
 
 function placeRegion(place) {
+  // A place can carry a ready-made region line (the GPS path uses this
+  // for its coordinates); otherwise it's built from the geocoding fields.
+  if (place.region) return place.region;
   return [place.admin1, place.country].filter(Boolean).join(", ");
 }
 
@@ -640,6 +644,91 @@ async function loadCity(rawQuery) {
   }
 }
 
+// ---------------------------------------------------------------------
+// "Use my location": ask the browser for a GPS fix and load the forecast
+// for those coordinates. Geolocation is only available in a secure
+// context (HTTPS, or localhost while developing) — on a plain-http host
+// the browser reports it as a denial rather than an error, which the
+// messages below are worded to survive.
+// ---------------------------------------------------------------------
+const GEOLOCATION_OPTIONS = {
+  enableHighAccuracy: true, // worth the battery: a course is a big place
+  timeout: 10000,
+  maximumAge: 60000, // a fix from the last minute is close enough
+};
+
+// Rendered as the region line under "My location", so a saved fix can
+// still be told apart from one taken at a different course.
+function formatCoordinates(latitude, longitude) {
+  const lat = `${Math.abs(latitude).toFixed(3)}\u00b0${latitude >= 0 ? "N" : "S"}`;
+  const lon = `${Math.abs(longitude).toFixed(3)}\u00b0${longitude >= 0 ? "E" : "W"}`;
+  return `${lat}, ${lon}`;
+}
+
+// GeolocationPositionError codes, spelled out rather than compared
+// against the constants, which don't exist when the API is missing.
+function describeGeolocationError(err) {
+  switch (err?.code) {
+    case 1: // PERMISSION_DENIED
+      return "Location permission denied — search for the course instead.";
+    case 2: // POSITION_UNAVAILABLE
+      return "Couldn't get a position fix. Try again out in the open.";
+    case 3: // TIMEOUT
+      return "Location timed out. Try again with a clear view of the sky.";
+    default:
+      return "Couldn't read your location. Search for the course instead.";
+  }
+}
+
+function setLocationBusy(busy) {
+  const button = document.getElementById("use-location");
+  button.disabled = busy;
+  button.classList.toggle("is-busy", busy);
+}
+
+function useMyLocation() {
+  if (!navigator.geolocation) {
+    setStatus("This browser can't share a location. Search for the course instead.", "error");
+    return;
+  }
+
+  // The request id is claimed on the tap rather than when the fix lands,
+  // so a search started while GPS is still thinking wins — the same
+  // staleness guard the search path uses.
+  const requestId = ++latestRequestId;
+  setStatus("Finding you on the course\u2026", "loading");
+  setLocationBusy(true);
+
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      setLocationBusy(false);
+      if (requestId !== latestRequestId) return; // superseded while waiting
+
+      const { latitude, longitude } = position.coords;
+      loadPlace(
+        {
+          name: "My location",
+          region: formatCoordinates(latitude, longitude),
+          latitude,
+          longitude,
+        },
+        requestId
+      );
+    },
+    (err) => {
+      setLocationBusy(false);
+      if (requestId !== latestRequestId) return; // superseded while waiting
+      console.error(err);
+      setStatus(describeGeolocationError(err), "error");
+    },
+    GEOLOCATION_OPTIONS
+  );
+}
+
+function initGeolocation() {
+  document.getElementById("use-location").addEventListener("click", useMyLocation);
+}
+
 function initSearchForm() {
   const form = document.getElementById("search-form");
   const input = document.getElementById("city-input");
@@ -655,6 +744,7 @@ function initSearchForm() {
 initTheme();
 initSearchForm();
 initSavedPlaces();
+initGeolocation();
 
 // Open on the first saved course when there is one, otherwise the default.
 const savedOnLoad = readSavedPlaces();
