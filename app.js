@@ -295,6 +295,15 @@ function formatValue(value, unit = "", digits = 0) {
   return `${Number(value).toFixed(digits)}${unit}`;
 }
 
+// In m/s the numbers are small enough that rounding to whole units hides
+// a real difference — a "6" could be anything from 5.5 to 6.4, which is
+// most of a club. One decimal keeps that visible.
+const WIND_DECIMALS = 1;
+
+function formatWind(value, unit = "") {
+  return formatValue(value, unit, WIND_DECIMALS);
+}
+
 const COMPASS_POINTS = [
   "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
   "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
@@ -310,16 +319,17 @@ function compassFromDegrees(degrees) {
 
 // Wind matters more on a golf course than anywhere else, so the current
 // wind gets a plain-language read on what it means for the round. The
-// thresholds are in km/h, the unit Open-Meteo returns by default.
+// thresholds are in m/s, the unit the forecast is requested in; they are
+// the old km/h bands divided by 3.6 and rounded to something sayable.
 function describeWindForGolf(speed) {
   if (speed === null || speed === undefined || Number.isNaN(Number(speed))) {
     return "Wind data unavailable.";
   }
-  const kmh = Number(speed);
-  if (kmh < 8) return "Barely a breath — pure scoring conditions.";
-  if (kmh < 16) return "Gentle breeze — a club at most into the wind.";
-  if (kmh < 29) return "Honest wind — take an extra club and swing easy.";
-  if (kmh < 45) return "Strong wind — keep it low and under the gusts.";
+  const ms = Number(speed);
+  if (ms < 2) return "Barely a breath — pure scoring conditions.";
+  if (ms < 4.5) return "Gentle breeze — a club at most into the wind.";
+  if (ms < 8) return "Honest wind — take an extra club and swing easy.";
+  if (ms < 12.5) return "Strong wind — keep it low and under the gusts.";
   return "Brutal out there — links golf whether you like it or not.";
 }
 
@@ -378,6 +388,7 @@ async function fetchForecast(latitude, longitude) {
     `&daily=weather_code,temperature_2m_max,temperature_2m_min,` +
     `wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,` +
     `precipitation_probability_max,precipitation_sum` +
+    `&wind_speed_unit=ms` +
     `&timezone=auto&forecast_days=5`;
 
   const data = await fetchJson(url);
@@ -466,8 +477,8 @@ function render(data) {
         <span class="strip-day-name">${d.day}</span>
         <span class="strip-arrow" style="--dir: ${Number(d.direction) || 0}deg"
               aria-hidden="true">&#8593;</span>
-        <span class="strip-primary">${formatValue(d.speed)}</span>
-        <span class="strip-secondary">G ${formatValue(d.gusts)}</span>
+        <span class="strip-primary">${formatWind(d.speed)}</span>
+        <span class="strip-secondary">G ${formatWind(d.gusts)}</span>
         <span class="strip-secondary">${compassFromDegrees(d.direction)}</span>
       </div>
     `
@@ -525,9 +536,9 @@ function render(data) {
     <section class="wind">
       <h2 class="section-heading">Wind Forecast</h2>
       <p class="wind-now">
-        <span class="wind-now-value">${formatValue(data.wind.speed, ` ${data.wind.speedUnit}`)}</span>
+        <span class="wind-now-value">${formatWind(data.wind.speed, ` ${data.wind.speedUnit}`)}</span>
         <span class="wind-now-meta">from ${compassFromDegrees(data.wind.direction)} &middot;
-          gusting ${formatValue(data.wind.gusts, ` ${data.wind.speedUnit}`)}</span>
+          gusting ${formatWind(data.wind.gusts, ` ${data.wind.speedUnit}`)}</span>
       </p>
       <p class="section-note">${describeWindForGolf(data.wind.speed)}</p>
       <div class="strip-row">
@@ -1127,14 +1138,14 @@ function paintCompass() {
     `rotate(${-compassState.heading}deg)`;
 
   const speedUnit = currentWind?.speedUnit ? ` ${currentWind.speedUnit}` : "";
-  document.getElementById("compass-speed").textContent = formatValue(
+  document.getElementById("compass-speed").textContent = formatWind(
     currentWind?.speed ?? null,
     speedUnit
   );
 
   const gusts = currentWind?.gusts ?? null;
   document.getElementById("compass-gusts").textContent =
-    gusts === null ? "" : `gusting ${formatValue(gusts, speedUnit)}`;
+    gusts === null ? "" : `gusting ${formatWind(gusts, speedUnit)}`;
 
   document.getElementById("compass-from").textContent = hasDirection
     ? `from ${compassFromDegrees(direction)}`
