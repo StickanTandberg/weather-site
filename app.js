@@ -586,11 +586,28 @@ let latestRequestId = 0;
 // The place currently on screen, so it can be saved or un-saved.
 let currentPlace = null;
 
+// How many loads are waiting on the network. The background refresh
+// stands down while one is in flight, so it can never claim a request id
+// and cancel a search the player is waiting on.
+let inFlightLoads = 0;
+
+// When the forecast on screen was last fetched, so a page coming back
+// from the background can tell whether it has gone stale.
+let lastLoadedAt = 0;
+
 // Loads a place that's already been resolved to coordinates — a saved
-// place, or a fresh geocoding hit.
-async function loadPlace(place, requestId = ++latestRequestId) {
-  setStatus(`Loading conditions for ${place.name}…`, "loading");
-  setSearchDisabled(true);
+// place, a fresh geocoding hit, or the ten-minute refresh.
+//
+// A quiet load is that refresh: it repaints the card and the compass but
+// leaves the status line and the search box alone, so the page doesn't
+// flash "Loading…" and grey out the search every ten minutes while
+// you're standing over a shot.
+async function loadPlace(place, requestId = ++latestRequestId, { quiet = false } = {}) {
+  if (!quiet) {
+    setStatus(`Loading conditions for ${place.name}…`, "loading");
+    setSearchDisabled(true);
+  }
+  inFlightLoads += 1;
 
   try {
     const apiResponse = await fetchForecast(place.latitude, place.longitude);
@@ -600,15 +617,21 @@ async function loadPlace(place, requestId = ++latestRequestId) {
     const data = toRenderData(apiResponse, place);
     render(data);
     currentWind = data.wind;
+    lastLoadedAt = Date.now();
     paintCompass(); // no-op while the compass is closed
     renderSavedPlaces(); // refresh which saved chip is highlighted
-    setStatus("", null);
+
+    if (!quiet) setStatus("", null);
   } catch (err) {
     if (requestId !== latestRequestId) return; // a newer search superseded this one
     console.error(err);
-    setStatus(describeError(err), "error");
+    // A failed background refresh keeps quiet: what's on screen is still
+    // the best we have, and its "Last updated" time stops advancing,
+    // which is the honest signal that it's going stale.
+    if (!quiet) setStatus(describeError(err), "error");
   } finally {
-    if (requestId === latestRequestId) {
+    inFlightLoads -= 1;
+    if (!quiet && requestId === latestRequestId) {
       setSearchDisabled(false);
     }
   }
@@ -625,6 +648,7 @@ async function loadCity(rawQuery) {
   const requestId = ++latestRequestId;
   setStatus(`Loading weather for "${query}"…`, "loading");
   setSearchDisabled(true);
+  inFlightLoads += 1;
 
   try {
     const place = await geocodeCity(query);
@@ -644,6 +668,8 @@ async function loadCity(rawQuery) {
     console.error(err);
     setStatus(describeError(err), "error");
     setSearchDisabled(false);
+  } finally {
+    inFlightLoads -= 1;
   }
 }
 
@@ -755,6 +781,8 @@ const compassState = {
   sourceRank: 0,       // which kind of reading we've locked onto
   rafId: null,
   sensorTimeoutId: null,
+  refreshId: null,
+  suspended: false,    // hidden tab: listeners dropped, permission kept
 };
 
 // How much of the gap to the newest reading to close each frame. Lower is
@@ -765,6 +793,11 @@ const HEADING_SMOOTHING = 0.15;
 // A reading has to arrive within this long, or we decide there's no
 // usable compass and fall back to the north-up dial.
 const SENSOR_TIMEOUT_MS = 2500;
+
+// How often the forecast is refetched while the compass is on screen.
+// Open-Meteo updates hourly, so this is about keeping a long round
+// honest rather than chasing new data.
+const COMPASS_REFRESH_MS = 10 * 60 * 1000;
 
 // Wind from the most recent forecast, so the compass can repaint without
 // refetching. Kept in step with the card by loadPlace().
@@ -946,6 +979,7 @@ async function startCompassSensor() {
 function stopCompassSensor() {
   detachOrientationListeners();
   stopCompassLoop();
+  compassState.suspended = false;
   compassState.hasSensor = false;
   compassState.sourceRank = 0;
   compassState.targetHeading = null;
@@ -984,6 +1018,68 @@ function stopCompassLoop() {
   if (compassState.rafId !== null) {
     window.cancelAnimationFrame(compassState.rafId);
     compassState.rafId = null;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Keeping the wind current, and staying out of the way when the page
+// isn't being looked at. A phone in a back pocket between holes should
+// not be running a magnetometer, an animation frame and a timer.
+// ---------------------------------------------------------------------
+function refreshWindQuietly() {
+  // Nothing to refetch, or a user-initiated load is already running and
+  // would be cancelled if this claimed a newer request id.
+  if (!currentPlace || inFlightLoads > 0 || document.hidden) return;
+  loadPlace(currentPlace, ++latestRequestId, { quiet: true });
+}
+
+function startCompassRefresh() {
+  stopCompassRefresh(); // never stack two timers
+  compassState.refreshId = window.setInterval(refreshWindQuietly, COMPASS_REFRESH_MS);
+}
+
+function stopCompassRefresh() {
+  if (compassState.refreshId !== null) {
+    window.clearInterval(compassState.refreshId);
+    compassState.refreshId = null;
+  }
+}
+
+// Hidden tab: drop the listeners, the frame loop and the timer, but hold
+// on to the heading and the granted permission so coming back doesn't
+// cost another tap.
+function suspendCompass() {
+  stopCompassRefresh();
+  stopCompassLoop();
+
+  if (compassState.status === "live") {
+    detachOrientationListeners();
+    compassState.suspended = true;
+  }
+}
+
+function resumeCompass() {
+  if (!compassState.open) return;
+
+  if (compassState.suspended) {
+    compassState.suspended = false;
+    attachOrientationListeners(); // restarts the frame loop too
+  }
+
+  startCompassRefresh();
+
+  // Back from a spell in a pocket: if the forecast has aged past a
+  // refresh interval, don't wait another ten minutes for fresh wind.
+  if (Date.now() - lastLoadedAt > COMPASS_REFRESH_MS) {
+    refreshWindQuietly();
+  }
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) {
+    suspendCompass();
+  } else {
+    resumeCompass();
   }
 }
 
@@ -1081,6 +1177,8 @@ function openCompass() {
     // Everywhere else there's nothing to ask for, so save the tap.
     startCompassSensor();
   }
+
+  startCompassRefresh();
 }
 
 function closeCompass() {
@@ -1089,6 +1187,7 @@ function closeCompass() {
   const toggle = document.getElementById("compass-toggle");
   toggle.setAttribute("aria-expanded", "false");
   toggle.classList.remove("is-active");
+  stopCompassRefresh();
   stopCompassSensor(); // no listeners or animation frames while it's shut
 }
 
@@ -1102,6 +1201,8 @@ function initCompass() {
   });
 
   document.getElementById("compass-start").addEventListener("click", startCompassSensor);
+
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 }
 
 function initSearchForm() {
