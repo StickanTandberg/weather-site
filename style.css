@@ -538,6 +538,27 @@ body {
   color: var(--text-muted);
 }
 
+.compass-start {
+  margin-top: 10px;
+  padding: 9px 20px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.compass-start:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.compass-start:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .compass-note {
   margin: 10px 0 0;
   font-size: 0.72rem;

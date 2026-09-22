@@ -748,9 +748,23 @@ function initGeolocation() {
 // ---------------------------------------------------------------------
 const compassState = {
   open: false,
-  heading: 0,
+  heading: 0,          // what's on screen now, eased toward targetHeading
+  targetHeading: null, // the newest sensor reading, null until one lands
   hasSensor: false,
+  status: "idle",      // idle | starting | live | denied | unavailable
+  sourceRank: 0,       // which kind of reading we've locked onto
+  rafId: null,
+  sensorTimeoutId: null,
 };
+
+// How much of the gap to the newest reading to close each frame. Lower is
+// smoother but laggier; 0.15 settles in about a fifth of a second and
+// still swallows the jitter a phone magnetometer produces.
+const HEADING_SMOOTHING = 0.15;
+
+// A reading has to arrive within this long, or we decide there's no
+// usable compass and fall back to the north-up dial.
+const SENSOR_TIMEOUT_MS = 2500;
 
 // Wind from the most recent forecast, so the compass can repaint without
 // refetching. Kept in step with the card by loadPlace().
@@ -791,12 +805,214 @@ function describeRelativeWind(relative) {
   return { label: "Quartering headwind, off the left", hint: "Club up; the ball drifts right." };
 }
 
-function compassFacingText() {
-  if (!compassState.hasSensor) {
-    return "No compass sensor — the dial is locked north up.";
+// Shortest signed way from one bearing to another, always in -180..180.
+// This is what stops the dial taking the long way round when the heading
+// crosses north: 359 -> 5 is +6 degrees, not -354.
+function angleDelta(from, to) {
+  return ((((to - from) % 360) + 540) % 360) - 180;
+}
+
+// One step of a low-pass filter, run per animation frame.
+function smoothHeading(current, target, factor) {
+  const stepped = current + angleDelta(current, target) * factor;
+  return ((stepped % 360) + 360) % 360;
+}
+
+// How far the page itself is rotated from the device's natural
+// orientation. The sensor reports where the device's top edge points, so
+// this is added to get where the top of the *screen* points.
+function screenAngle() {
+  const angle = screen.orientation?.angle ?? window.orientation ?? 0;
+  return Number(angle) || 0;
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+// Sources ranked by how much they can be trusted. A better source may
+// take over later, a worse one is ignored once a better one is running.
+//   3  iOS webkitCompassHeading — already true north, clockwise
+//   2  an absolute event — north-referenced via the magnetometer
+//   1  plain alpha — relative to wherever the device booted, and it
+//      drifts, but it's what desktop orientation emulation provides
+function orientationSourceRank(event) {
+  if (typeof event.webkitCompassHeading === "number" && !Number.isNaN(event.webkitCompassHeading)) {
+    return 3;
   }
-  const heading = Math.round(compassState.heading) % 360;
-  return `Facing ${heading}\u00b0 (${compassFromDegrees(heading)})`;
+  if (event.type === "deviceorientationabsolute" || event.absolute === true) {
+    return 2;
+  }
+  return 1;
+}
+
+function headingFromEvent(event) {
+  // iOS hands us a compass bearing directly.
+  if (typeof event.webkitCompassHeading === "number" && !Number.isNaN(event.webkitCompassHeading)) {
+    return event.webkitCompassHeading;
+  }
+  // Everywhere else alpha counts anticlockwise from north, so it has to
+  // be flipped to read as a clockwise bearing.
+  if (typeof event.alpha === "number" && !Number.isNaN(event.alpha)) {
+    return (360 - event.alpha) % 360;
+  }
+  return null; // an event with nothing usable in it
+}
+
+// Stores the newest reading and nothing else — the DOM is only touched
+// from the animation frame, so a sensor firing 60 times a second can't
+// turn into 60 layouts.
+function handleOrientationEvent(event) {
+  const rank = orientationSourceRank(event);
+  if (rank < compassState.sourceRank) return; // a worse source; ignore it
+
+  const heading = headingFromEvent(event);
+  if (heading === null) return;
+
+  compassState.sourceRank = rank;
+  compassState.targetHeading = (((heading + screenAngle()) % 360) + 360) % 360;
+
+  if (!compassState.hasSensor) {
+    // First usable reading: adopt it outright rather than easing to it
+    // from an arbitrary north, which would spin the dial on startup.
+    compassState.heading = compassState.targetHeading;
+    compassState.hasSensor = true;
+    setCompassStatus("live");
+    window.clearTimeout(compassState.sensorTimeoutId);
+    compassState.sensorTimeoutId = null;
+  }
+}
+
+// Both names are attached: Chrome fires deviceorientationabsolute, iOS
+// only ever fires deviceorientation, and Firefox marks its plain event
+// absolute. The ranking above sorts out which one to believe.
+const ORIENTATION_EVENTS = ["deviceorientationabsolute", "deviceorientation"];
+
+function attachOrientationListeners() {
+  detachOrientationListeners(); // idempotent, so a retry can't stack timeouts
+
+  for (const name of ORIENTATION_EVENTS) {
+    window.addEventListener(name, handleOrientationEvent);
+  }
+
+  // Desktop browsers happily add the listener and then never fire it.
+  compassState.sensorTimeoutId = window.setTimeout(() => {
+    if (!compassState.hasSensor) setCompassStatus("unavailable");
+  }, SENSOR_TIMEOUT_MS);
+
+  startCompassLoop();
+}
+
+function detachOrientationListeners() {
+  for (const name of ORIENTATION_EVENTS) {
+    window.removeEventListener(name, handleOrientationEvent);
+  }
+  window.clearTimeout(compassState.sensorTimeoutId);
+  compassState.sensorTimeoutId = null;
+}
+
+// iOS 13+ gates the sensor behind a permission call that only works
+// inside a user gesture — hence the Start compass button.
+function orientationNeedsPermission() {
+  return (
+    typeof DeviceOrientationEvent !== "undefined" &&
+    typeof DeviceOrientationEvent.requestPermission === "function"
+  );
+}
+
+async function startCompassSensor() {
+  if (compassState.status === "live" || compassState.status === "starting") return;
+  setCompassStatus("starting");
+
+  if (orientationNeedsPermission()) {
+    try {
+      const response = await DeviceOrientationEvent.requestPermission();
+      if (response !== "granted") {
+        setCompassStatus("denied");
+        return;
+      }
+    } catch (err) {
+      // Thrown when the call didn't come from a tap, or the page isn't
+      // on HTTPS. Either way there's no sensor to be had.
+      console.error(err);
+      setCompassStatus("denied");
+      return;
+    }
+  }
+
+  attachOrientationListeners();
+}
+
+function stopCompassSensor() {
+  detachOrientationListeners();
+  stopCompassLoop();
+  compassState.hasSensor = false;
+  compassState.sourceRank = 0;
+  compassState.targetHeading = null;
+  compassState.heading = 0; // back to the north-up chart
+  setCompassStatus("idle");
+}
+
+// The single place the dial is repainted from. Everything else just
+// updates state and lets this pick it up on the next frame.
+function compassFrame() {
+  const target = compassState.targetHeading;
+
+  if (target !== null) {
+    const next = prefersReducedMotion()
+      ? target // no easing: step straight to the reading
+      : smoothHeading(compassState.heading, target, HEADING_SMOOTHING);
+
+    // Below about a twentieth of a degree there's nothing to see, so
+    // skip the repaint and let the browser idle.
+    if (Math.abs(angleDelta(compassState.heading, next)) > 0.05) {
+      compassState.heading = next;
+      paintCompass();
+    }
+  }
+
+  compassState.rafId = window.requestAnimationFrame(compassFrame);
+}
+
+function startCompassLoop() {
+  if (compassState.rafId === null) {
+    compassState.rafId = window.requestAnimationFrame(compassFrame);
+  }
+}
+
+function stopCompassLoop() {
+  if (compassState.rafId !== null) {
+    window.cancelAnimationFrame(compassState.rafId);
+    compassState.rafId = null;
+  }
+}
+
+function setCompassStatus(status) {
+  compassState.status = status;
+  // The button is only worth offering when a tap could still achieve
+  // something: not while it's running, and not after a refusal that iOS
+  // won't ask about again.
+  const startButton = document.getElementById("compass-start");
+  startButton.hidden = !(compassState.open && (status === "idle" || status === "unavailable"));
+  startButton.disabled = status === "starting";
+  paintCompass();
+}
+
+function compassFacingText() {
+  switch (compassState.status) {
+    case "live": {
+      const heading = Math.round(compassState.heading) % 360;
+      return `Facing ${heading}\u00b0 (${compassFromDegrees(heading)})`;
+    }
+    case "starting":
+      return "Waking the compass\u2026";
+    case "denied":
+      return "Compass permission denied — the dial is locked north up.";
+    case "unavailable":
+      return "No compass sensor — the dial is locked north up.";
+    default:
+      return "Start the compass to have the dial follow the way you're facing.";
+  }
 }
 
 // Writes the whole compass from compassState + currentWind. Cheap enough
@@ -856,6 +1072,15 @@ function openCompass() {
   toggle.setAttribute("aria-expanded", "true");
   toggle.classList.add("is-active");
   paintCompass();
+
+  if (orientationNeedsPermission()) {
+    // iOS: the sensor can only be asked for from inside a tap, so wait
+    // for one rather than firing a request that's guaranteed to throw.
+    setCompassStatus("idle");
+  } else {
+    // Everywhere else there's nothing to ask for, so save the tap.
+    startCompassSensor();
+  }
 }
 
 function closeCompass() {
@@ -864,6 +1089,7 @@ function closeCompass() {
   const toggle = document.getElementById("compass-toggle");
   toggle.setAttribute("aria-expanded", "false");
   toggle.classList.remove("is-active");
+  stopCompassSensor(); // no listeners or animation frames while it's shut
 }
 
 function initCompass() {
@@ -874,6 +1100,8 @@ function initCompass() {
       openCompass();
     }
   });
+
+  document.getElementById("compass-start").addEventListener("click", startCompassSensor);
 }
 
 function initSearchForm() {
